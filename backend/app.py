@@ -1,63 +1,83 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import numpy as np
+from fastapi import FastAPI, UploadFile, File
+import shutil
+import os
 import joblib
-
-# =========================
-# LOAD TRAINED MODEL
-# =========================
-
-model = joblib.load("../model/diabetes_model.pkl")
-
-# =========================
-# CREATE FASTAPI APP
-# =========================
+import pandas as pd
+import easyocr
+import re
 
 app = FastAPI()
 
-# =========================
-# INPUT FORMAT
-# =========================
+# Create uploads folder automatically
+os.makedirs("uploads", exist_ok=True)
 
-class HealthData(BaseModel):
-    glucose: float
-    bmi: float
-    age: int
-    blood_pressure: float
+# Load model
+model = joblib.load("../model/diabetes_model.pkl")
 
-# =========================
-# PREDICTION API
-# =========================
+# OCR Reader
+reader = easyocr.Reader(['en'])
 
-@app.post("/predict")
-def predict(data: HealthData):
+@app.get("/")
+def home():
+    return {"message": "Diabetes AI Running"}
 
-    # Convert input to array
-    features = np.array([[
-        data.glucose,
-        data.bmi,
-        data.age,
-        data.blood_pressure
-    ]])
+@app.post("/predict-image")
+async def predict_image(file: UploadFile = File(...)):
 
-    # AI Prediction
-    prediction = model.predict(features)[0]
+    # Save uploaded file
+    file_path = f"uploads/{file.filename}"
 
-    # Probability
-    probability = model.predict_proba(features)[0][1]
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    # Risk Level
-    risk = "Low"
+    # OCR
+    result = reader.readtext(file_path)
+
+    text = ""
+
+    for item in result:
+        text += item[1] + " "
+
+    # Extract values using regex
+    glucose = re.search(r'glucose[:\s]*(\d+)', text, re.I)
+    bmi = re.search(r'bmi[:\s]*(\d+\.?\d*)', text, re.I)
+    age = re.search(r'age[:\s]*(\d+)', text, re.I)
+    bp = re.search(r'blood pressure[:\s]*(\d+)', text, re.I)
+
+    values = {
+        "Glucose": int(glucose.group(1)) if glucose else 120,
+        "BMI": float(bmi.group(1)) if bmi else 25,
+        "Age": int(age.group(1)) if age else 30,
+        "BloodPressure": int(bp.group(1)) if bp else 80
+    }
+
+    # Predict
+    df = pd.DataFrame([values])
+
+    prediction = model.predict(df)[0]
+
+    probability = model.predict_proba(df)[0][1]
+
+    # Recommendations
+    recommendations = []
 
     if probability > 0.7:
-        risk = "High"
+        recommendations = [
+            "Reduce sugary drinks",
+            "Exercise daily",
+            "Sleep 8 hours",
+            "Avoid junk food"
+        ]
+    else:
+        recommendations = [
+            "Maintain healthy lifestyle",
+            "Stay hydrated"
+        ]
 
-    elif probability > 0.4:
-        risk = "Medium"
-
-    # Return result
     return {
+        "ocr_text": text,
+        "values": values,
         "prediction": int(prediction),
-        "risk_level": risk,
-        "probability": float(probability)
+        "probability": float(probability),
+        "recommendations": recommendations
     }
